@@ -1,125 +1,80 @@
-import os
-import json
-
-from score.score import score
-
 import cv2
-import pytesseract
-import pandas as pd
-from PIL import Image, ImageEnhance, ImageFilter
-from pdf2image import convert_from_path
+import numpy as np
+
+ERROR = 1234
 
 
-def df_save(df, name):
-    df.iloc[[6, 5], :] = df.iloc[[5, 6], :]
-    df.index = ['FVC(L)', 'FEV1(L)', 'FEV1/FVC(%)', 'MMEF 75/25(L/s)', 'PEF(L/s)', 'MVV(L/min)', 'IC forced(L)',
-                'ATS error code', 'Level data']
-    df.columns = ['Pred', 'Pre', '%Pre/Pred', 'Post', '%Post/Pred', '%Chg']
-    df.to_csv(f'output_csvs/{name}.csv')
+# 度數轉換
+def degree_trans(theta):
+    return theta / np.pi * 180
 
 
-def df_check(result):
-    table = [[result[i * 6 + j] for j in range(6)] for i in range(6)]
-    table.append([result[36], '', '', '', '', ''])
-    table.append(['', result[37], '', result[38], '', ''])
-    table.append(['', result[39], '', '', '', ''])
-
-    df = pd.DataFrame(table)
-    df.reset_index(drop=True, inplace=True)
-    df.to_csv("score\check.csv", index=False, header=False)
-    return df
+# 逆時針旋轉圖像degree角度（原尺寸）
+def rotate_image(src, degree):
+    center = (src.shape[1] // 2, src.shape[0] // 2)
+    length = int(np.sqrt(src.shape[1] ** 2 + src.shape[0] ** 2))
+    M = cv2.getRotationMatrix2D(center, degree, 1)
+    rotated_image = cv2.warpAffine(src, M, (length, length), borderValue=(255, 255, 255))
+    return rotated_image
 
 
-def extract_pdf(pdf_root_path="./input_pdfs", img_root_path="./output_images"):
-    pdf_names = []
-    for path, names, filenames in os.walk(pdf_root_path):
-        pdf_names = filter(lambda x: ".pdf" in x, filenames)
+# 通過霍夫變換計算角度
+def calc_degree(src_image):
+    mid_image = cv2.Canny(src_image, 50, 200, 3)
+    dst_image = cv2.cvtColor(mid_image, cv2.COLOR_GRAY2BGR)
 
-    # 將 pdf 轉成 png
-    for pdf_name in pdf_names:
-        pdf_path = os.path.join(pdf_root_path, pdf_name)
-        images = convert_from_path(pdf_path, 600)
-        img_path = os.path.join(img_root_path, f'{pdf_name[:-4]}.png')
-        images[0].save(img_path, 'PNG')
+    lines = cv2.HoughLines(mid_image, 1, np.pi / 180, 300, 0, 0)
 
+    if not lines is None and len(lines) == 0:
+        lines = cv2.HoughLines(mid_image, 1, np.pi / 180, 200, 0, 0)
 
-def extract_png(img_root_path="./output_images", config_path="config.json"):
-    with open(config_path, 'r') as file:
-        data = json.load(file)
+    if not lines is None and len(lines) == 0:
+        lines = cv2.HoughLines(mid_image, 1, np.pi / 180, 150, 0, 0)
 
-    x_table_scale = data["x_table_scale"]
-    y_table_scale = data["y_table_scale"]
-    x_special_scale = data["x_special_scale"]
-    y_special_scale = data["y_special_scale"]
+    if lines is None or len(lines) == 0:
+        print("沒有檢測到直線！")
+        return ERROR
 
-    png_names = []
-    for path, names, filenames in os.walk(img_root_path):
-        png_names = list(filter(lambda x: ".png" in x, filenames))
+    sum_theta = 0
+    for line in lines:
+        rho, theta = line[0]
+        sum_theta += theta
+        a = np.cos(theta)
+        b = np.sin(theta)
+        x0 = a * rho
+        y0 = b * rho
+        pt1 = (int(x0 + 1000 * (-b)), int(y0 + 1000 * a))
+        pt2 = (int(x0 - 1000 * (-b)), int(y0 - 1000 * a))
+        cv2.line(dst_image, pt1, pt2, (55, 100, 195), 1, cv2.LINE_AA)
 
-    # 將 png 轉成 csv
-    for png_name in png_names:
-        png_path = os.path.join(img_root_path, png_name)
+    average_theta = sum_theta / len(lines)
+    print("average theta:", average_theta)
 
-        # 將整體 png 進行影像增強
-        enhancement_factor = 2
-        radius = 2.6
-        img = Image.open(png_path)
-        smoothed_img = img.filter(ImageFilter.GaussianBlur(radius))
-        enhancer = ImageEnhance.Contrast(smoothed_img)
-        enhance_img = enhancer.enhance(enhancement_factor)
-
-        enhance_img.save(f"processed_images/{png_name}")
-
-        # 分割並進行辨識 只辨識數字
-        result = []
-        cnt = 0
-        for y_pos in y_table_scale:
-            for x_pos in x_table_scale:
-                cropped_img = enhance_img.crop((x_pos[0], y_pos[0], x_pos[1], y_pos[1]))
-                cnt += 1
-                content = pytesseract.image_to_string(cropped_img, lang='eng',
-                                                      config=r'--psm 6outputbase digits')
-                result.append(content.replace("\n", ""))
-
-        for (x_pos, y_pos) in zip(x_special_scale, y_special_scale):
-            cropped_img = enhance_img.crop((x_pos[0], y_pos[0], x_pos[1], y_pos[1]))
-            cnt += 1
-            content = pytesseract.image_to_string(cropped_img, lang='eng', config=r'--psm 6 outputbase digits')
-            result.append(content.replace("\n", ""))
-
-        df = df_check(result)
-        df_save(df, png_name[:-4])
+    angle = degree_trans(average_theta) - 90
+    return angle
 
 
-def grid_visualization(ori_img_path="output_images/demo_0.png", grid_img_path="output_images/grid_visualization.png",
-                       config_path="config.json"):
-    color = (0, 255, 0)
-    thickness = 2
+def image_recify(input_file, output_file):
+    degree = 0
+    src = cv2.imread(input_file)
+    cv2.imshow("ori", cv2.resize(src, (1000, 1400)))
 
-    # config.json 中儲存每個格子的座標
-    with open(config_path, 'r') as file:
-        data = json.load(file)
+    # 傾斜角度校正
+    degree = calc_degree(src)
+    if degree == ERROR:
+        print("校正失敗！")
+        return
 
-    x_table_scale = data["x_table_scale"]
-    y_table_scale = data["y_table_scale"]
-    x_special_scale = data["x_special_scale"]
-    y_special_scale = data["y_special_scale"]
+    rotated_dst = rotate_image(src, degree)
+    print("angle:", degree)
+    cv2.imshow("aft", cv2.resize(rotated_dst, (1000, 1400)))
 
-    img = cv2.imread(ori_img_path)
-
-    # 將分割的結果可視化
-    for y_pos in y_table_scale:
-        for x_pos in x_table_scale:
-            cv2.rectangle(img, (x_pos[0], y_pos[0]), (x_pos[1], y_pos[1]), color, thickness)
-
-    for (x_pos, y_pos) in zip(x_special_scale, y_special_scale):
-        cv2.rectangle(img, (x_pos[0], y_pos[0]), (x_pos[1], y_pos[1]), color, thickness)
-
-    cv2.imwrite(grid_img_path, img)
+    result_image = rotated_dst[0:500, 0:rotated_dst.shape[1]]  # 根據先驗知識，估計好文本的長寬，再裁剪下來
+    cv2.imshow("fin", cv2.resize(result_image, (1000, 1400)))
+    cv2.imwrite(output_file, result_image)
 
 
 if __name__ == "__main__":
-    # pip line
-    extract_pdf()
-    extract_png()
-    score()
+    image_recify("output_images/test.png", "FinalImage.jpg")
+    cv2.waitKey()
+    cv2.destroyAllWindows()
