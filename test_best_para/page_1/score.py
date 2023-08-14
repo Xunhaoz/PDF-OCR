@@ -18,17 +18,17 @@ def score(ac, check):
     check.dropna(axis=0, how='all', inplace=True)
     check.dropna(axis=1, how='all', inplace=True)
 
-    print("==================== ac error ===================")
-    print(ac)
-    print("\n================== check error ==================")
-    print(check)
-    print("\n===================== score =====================")
+    # print("==================== ac error ===================")
+    # print(ac)
+    # print("\n================== check error ==================")
+    # print(check)
+    # print("\n===================== score =====================")
 
     num_different_cells = comparison_df.sum().sum() / (comparison_df.shape[0] * comparison_df.shape[1])
 
     print("ac rate: ", round(1 - num_different_cells, 4))
 
-    with open("test_log.txt", "a") as f:
+    with open("page_1.txt", "a") as f:
         f.write(f"ac rate: {round(1 - num_different_cells, 4)}\n")
 
 
